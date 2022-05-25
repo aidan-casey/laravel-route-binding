@@ -51,7 +51,7 @@ This package does make extensive use of reflection classes. It is recommended th
 use AidanCasey\Laravel\RouteBinding\Binder;
 use Illuminate\Support\ServiceProvider;
 
-class ServiceProvider extends ServiceProvider
+class SomeServiceProvider extends ServiceProvider
 {
     public function register(){
         $this->app->beforeResolving(MyClass::class, function ($class, $parameters, $app) {
