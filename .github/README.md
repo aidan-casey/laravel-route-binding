@@ -40,7 +40,9 @@ Binder::call(MyTestClass::class, 'execute', [
 ]);
 
 // Calls the "execute" method on the existing instance.
+
 $instance = new MyTestClass;
+
 Binder::call($instance, 'execute');
 ```
 
