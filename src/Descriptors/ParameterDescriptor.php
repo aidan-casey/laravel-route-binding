@@ -76,7 +76,8 @@ final class ParameterDescriptor
     private function resolveTypes(): void
     {
         $type = $this->reflection->getType();
-        $types = match (get_class($type)) {
+
+        $types = (! $type) ? [] : match (get_class($type)) {
             'ReflectionNamedType' => [ $type ],
             'ReflectionUnionType' => $type->getTypes(),
             'ReflectionIntersectionType' => $type->getTypes(),
