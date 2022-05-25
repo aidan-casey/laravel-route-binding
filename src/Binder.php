@@ -78,7 +78,7 @@ class Binder
 
         $parameters = $this->route->resolveMethodDependencies($this->parameters, $method);
 
-        return call_user_func_array([$instance, $method->getName()], $parameters);
+        return call_user_func_array([$instance, $method->getName()], array_values($parameters));
     }
 
     private function createClass(array $parameters): object
@@ -94,7 +94,7 @@ class Binder
                 $parameters, new ReflectionMethod($instance, '__construct')
             );
 
-            call_user_func_array([$instance, '__construct'], $parameters);
+            call_user_func_array([$instance, '__construct'], array_values($parameters));
         }
 
         return $instance;
