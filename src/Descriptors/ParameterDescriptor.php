@@ -8,7 +8,7 @@ use ReflectionNamedType;
 use ReflectionParameter;
 use StringBackedEnum;
 
-final class BoundDependencyDescriptor
+final class ParameterDescriptor
 {
     private ReflectionParameter $reflection;
 
@@ -19,6 +19,11 @@ final class BoundDependencyDescriptor
         $this->reflection = $reflectionParameter;
 
         $this->resolveTypes();
+    }
+
+    public function getReflection(): ReflectionParameter
+    {
+        return $this->reflection;
     }
 
     public function getName(): string

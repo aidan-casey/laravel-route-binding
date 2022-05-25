@@ -2,15 +2,17 @@
 
 namespace AidanCasey\Laravel\RouteBinding;
 
-use AidanCasey\Laravel\RouteBinding\Descriptors\BoundDependencyDescriptor;
-use AidanCasey\Laravel\RouteBinding\Descriptors\BoundDescriptor;
+use AidanCasey\Laravel\RouteBinding\Descriptors\MethodDescriptor;
+use AidanCasey\Laravel\RouteBinding\Descriptors\ParameterDescriptor;
+use AidanCasey\Laravel\RouteBinding\Descriptors\ClassDescriptor;
+use BackedEnum;
 use Illuminate\Contracts\Routing\UrlRoutable;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Routing\Exceptions\BackedEnumCaseNotFoundException;
 use Illuminate\Routing\Route;
+use Illuminate\Support\Reflector;
 use Illuminate\Support\Str;
-use ReflectionMethod;
 
 class Binder
 {
@@ -18,16 +20,18 @@ class Binder
 
     private string|object $class;
 
-    private BoundDescriptor $descriptor;
+    private ClassDescriptor $descriptor;
+
+    private string $methodName;
 
     private array $parameters;
 
-    public function __construct(Route $route, string|object $class, ?string $method = '__construct', array $parameters = [])
+    public function __construct(Route $route, string|object $class, string $method = '__construct', array $parameters = [])
     {
         $this->route = $route;
         $this->class = $class;
-        $this->descriptor = new BoundDescriptor($class, $method);
-
+        $this->descriptor = new ClassDescriptor($class);
+        $this->methodName = $method;
         $this->parameters = array_replace_recursive($route->parameters(), $parameters);
     }
 
@@ -61,79 +65,138 @@ class Binder
 
     public function bind(): mixed
     {
-        $this->bindEnums();
-        $this->bindUrlRoutables();
-
-        $method = $this->descriptor->getMethod();
-
-        if (! $method && ! $this->descriptor->hasConstructor()) {
-            return new ($this->descriptor->getName());
+        if ($this->methodName === '__construct') {
+            return $this->bindClass();
         }
 
-        $instance = $this->createClass($this->parameters);
-
-        if (! $method || $method->getName() === '__construct') {
-            return $instance;
-        }
-
-        $parameters = $this->route->resolveMethodDependencies($this->parameters, $method);
-
-        return call_user_func_array([$instance, $method->getName()], array_values($parameters));
+        return $this->bindMethod($this->methodName);
     }
 
-    private function createClass(array $parameters): object
+    private function bindClass(): object
     {
         if (! is_string($this->class)) {
             return $this->class;
         }
 
-        $instance = $this->descriptor->getReflection()->newInstanceWithoutConstructor();
+        $method = $this->descriptor->getMethod('__construct');
 
-        if ($this->descriptor->hasConstructor()) {
-            $parameters = $this->route->resolveMethodDependencies(
-                $parameters, new ReflectionMethod($instance, '__construct')
-            );
-
-            call_user_func_array([$instance, '__construct'], array_values($parameters));
-        }
-
-        return $instance;
+        return $this->descriptor->newInstance(
+            ($method) ? $this->getMethodDependencies($method) : []
+        );
     }
 
-    private function bindEnums(): void
+    private function bindMethod(string $methodName): mixed
     {
-        $enumDependencies = $this->descriptor->getDependencies()->filter(
-            fn (BoundDependencyDescriptor $dependency) => $dependency->hasStringBackedEnums()
+        $instance = $this->bindClass();
+        $method = $this->descriptor->getMethod($methodName);
+
+        return call_user_func_array(
+            [$instance, $methodName], $this->getMethodDependencies($method)
+        );
+    }
+
+    private function getMethodDependencies(MethodDescriptor $method): array
+    {
+        $parameters = $this->resolveParametersForMethod($method);
+        $parameters = $this->bindEnumsForMethod($method, $parameters);
+        $parameters = $this->bindUrlRoutablesForMethod($method, $parameters);
+
+        foreach ($method->getParameters() as $parameter) {
+            // Skip parameters that have been resolved.
+            if (isset($parameters[$parameter->getName()])) {
+                continue;
+            }
+
+            $class = Reflector::getParameterClassName($parameter->getReflection());
+
+            if (! $class) {
+                continue;
+            }
+
+            $parameters[$parameter->getName()] = app()->make($class);
+        }
+
+        return $parameters;
+    }
+
+    private function resolveParametersForMethod(MethodDescriptor $method): array
+    {
+        $parameters = [];
+
+        foreach ($method->getParameters() as $parameter) {
+            $parameterName = $parameter->getName();
+
+            if ($name = $this->getParameterName($parameterName)) {
+                $parameters[$parameterName] = $this->parameters[$name];
+            }
+        }
+
+        return $parameters;
+    }
+
+    private function bindEnumsForMethod(MethodDescriptor $method, array $parameters): array
+    {
+        $enumDependencies = $method->getParameters()->filter(
+            fn (ParameterDescriptor $dependency) => $dependency->hasStringBackedEnums()
         );
 
-        foreach ($enumDependencies as $enum) {
-            $this->bindEnum($enum);
+        foreach ($enumDependencies as $enumDependency) {
+            $value = $parameters[$enumDependency->getName()] ?? null;
+
+            if (! $value) {
+                continue;
+            }
+
+            if ($resolved = $this->resolveEnumDependency($enumDependency, $value)) {
+                $parameters[$enumDependency->getName()] = $resolved;
+            }
         }
+
+        return $parameters;
     }
 
-    private function bindUrlRoutables(): void
+    private function bindUrlRoutablesForMethod(MethodDescriptor $method, array $parameters): array
     {
-        $routableDependencies = $this->descriptor->getDependencies(UrlRoutable::class);
+        $routableDependencies = $method->getParameters(UrlRoutable::class);
 
-        foreach ($routableDependencies as $routable) {
-            $this->bindUrlRoutable($routable);
+        foreach ($routableDependencies as $routableDependency) {
+            $value = $parameters[$routableDependency->getName()] ?? null;
+
+            if (! $value) {
+                continue;
+            }
+
+            if ($resolved = $this->resolveUrlRoutableDependency($routableDependency, $value)) {
+                $parameters[$routableDependency->getName()] = $resolved;
+            }
         }
+
+        return $parameters;
     }
 
-    private function bindUrlRoutable(BoundDependencyDescriptor $routable): void
+    private function resolveEnumDependency(ParameterDescriptor $parameter, mixed $value): ?BackedEnum
     {
-        if (! ($name = $this->getParameterName($routable->getName()))) {
-            return;
+        $enumClass = $parameter->getStringBackedEnums()->first();
+
+        $enum = $enumClass::tryFrom($value);
+
+        if (is_null($enum)) {
+            throw new BackedEnumCaseNotFoundException($enumClass, $value);
         }
 
-        $value = $this->parameters[$name];
+        return $enum;
+    }
 
+    private function resolveUrlRoutableDependency(ParameterDescriptor $parameter, mixed $value): ?UrlRoutable
+    {
         // If this value has already been bound, ignore it.
         if ($value instanceof UrlRoutable) {
-            return;
+            return $value;
         }
 
-        $type = $routable->getType(UrlRoutable::class)->first();
+        $name = $parameter->getName();
+
+        $type = $parameter->getType(UrlRoutable::class)->first();
 
         $instance = app()->make($type);
 
@@ -152,31 +215,10 @@ class Binder
         }
 
         if (isset($model)) {
-            $this->parameters[$name] = $model;
-
-            return;
+            return $model;
         }
 
         throw (new ModelNotFoundException)->setModel($type, [$value]);
-    }
-
-    private function bindEnum(BoundDependencyDescriptor $enum): void
-    {
-        if (! ($name = $this->getParameterName($enum->getName()))) {
-            return;
-        }
-
-        $value = (string) $this->parameters[$name];
-
-        $enumClass = $enum->getStringBackedEnums()->first();
-
-        $enum = $enumClass::tryFrom($value);
-
-        if (is_null($enum)) {
-            throw new BackedEnumCaseNotFoundException($enumClass, $value);
-        }
-
-        $this->parameters[$name] = $enum;
     }
 
     private function getParameterName(string $name): ?string
